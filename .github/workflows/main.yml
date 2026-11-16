@@ -1,4 +1,3 @@
-
 name: Build Kernel
 
 on:
@@ -50,6 +49,8 @@ jobs:
           cd kernel_root
           echo "Build: $DETAILS"
           git reset --hard 8a0ed768151e7835ce6ecc12c243303f560bea48
+          wget https://raw.githubusercontent.com/neovoim/everpal-kernel-builder/refs/heads/main/patches/vcu-legacy-abi.patch
+          git apply vcu-legacy-abi.patch
           chmod +x build.sh
           ./build.sh
 
