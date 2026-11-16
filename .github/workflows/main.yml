@@ -48,6 +48,7 @@ jobs:
         run: |
           cd kernel_root
           echo "Build: $DETAILS"
+          git fetch --depth=1 origin 8a0ed768151e7835ce6ecc12c243303f560bea48
           git reset --hard 8a0ed768151e7835ce6ecc12c243303f560bea48
           wget https://raw.githubusercontent.com/neovoim/everpal-kernel-builder/refs/heads/main/patches/vcu-legacy-abi.patch
           git apply vcu-legacy-abi.patch
