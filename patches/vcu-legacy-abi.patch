@@ -1,0 +1,147 @@
+diff --git a/drivers/media/platform/mtk-vcu/mtk_vcu.c b/drivers/media/platform/mtk-vcu/mtk_vcu.c
+index 6385e8fc5..bc0e2dcf8 100644
+--- a/drivers/media/platform/mtk-vcu/mtk_vcu.c
++++ b/drivers/media/platform/mtk-vcu/mtk_vcu.c
+@@ -528,6 +528,95 @@ static int vcu_ipi_get(struct mtk_vcu *vcu, unsigned long arg)
+ 	return ret;
+ }
+ 
++/*
++ * Legacy share_obj ABI: a 64-bit vpud built against SHARE_BUF_SIZE=64 issues
++ * ioctls with a 72-byte struct (cmd 0x40487600 / 0xc048760a) instead of the
++ * 88-byte one this kernel uses. Accept it and copy only 72 bytes in/out so we
++ * never overrun the daemon's buffer.
++ */
++#define VCU_LEGACY_SHARE_BUF_SIZE 64
++struct share_obj_legacy {
++	s32 id;
++	u32 len;
++	unsigned char share_buf[VCU_LEGACY_SHARE_BUF_SIZE];
++};
++#define VCU_SET_OBJECT_LEGACY	_IOW('v', 0, struct share_obj_legacy)
++#define VCU_GET_OBJECT_LEGACY	_IOWR('v', 10, struct share_obj_legacy)
++
++static void vcu_obj_to_legacy(struct share_obj_legacy *lo,
++			      const struct share_obj *o)
++{
++	lo->id = o->id;
++	lo->len = o->len;
++	if (o->len > VCU_LEGACY_SHARE_BUF_SIZE) {
++		pr_info_ratelimited("[VCU] legacy ABI: ipi %d len %u truncated to %d\n",
++				    o->id, o->len, VCU_LEGACY_SHARE_BUF_SIZE);
++		lo->len = VCU_LEGACY_SHARE_BUF_SIZE;
++	}
++	memcpy(lo->share_buf, o->share_buf, VCU_LEGACY_SHARE_BUF_SIZE);
++}
++
++static int vcu_ipi_get_legacy(struct mtk_vcu *vcu, unsigned long arg)
++{
++	unsigned int i;
++	int ret;
++	struct share_obj_legacy lo;
++	struct share_obj_legacy __user *uptr =
++		(struct share_obj_legacy __user *)arg;
++
++	if (copy_from_user(&lo, uptr, sizeof(lo)))
++		return -EINVAL;
++
++	i = ipi_id_to_inst_id(lo.id);
++	atomic_set(&vcu->ipi_done[i], 1);
++	ret = wait_event_freezable(vcu->get_wq[i],
++				   atomic_read(&vcu->ipi_got[i]));
++	if (ret != 0)
++		return ret;
++
++	vcu_obj_to_legacy(&lo, &vcu->user_obj[i]);
++	if (copy_to_user(uptr, &lo, sizeof(lo)))
++		ret = -EINVAL;
++	atomic_set(&vcu->ipi_got[i], 0);
++	return ret;
++}
++
++/*
++ * Legacy log ABI: the daemon uses a 1028-byte {u32 type; char log[1024]}
++ * object for GET_LOG (0x4404760b) and SET_LOG (0x4404760c); this kernel only
++ * knows the bare 1024-byte GET_LOG (0x4400760b) and has no SET_LOG.
++ * type 0 == "log string follows", which is what this kernel always produces.
++ */
++struct log_test_legacy {
++	u32 type;
++	char log_info[LOG_INFO_SIZE];
++};
++#define VCU_GET_LOG_OBJECT_LEGACY	_IOW('v', 11, struct log_test_legacy)
++#define VCU_SET_LOG_OBJECT_LEGACY	_IOW('v', 12, struct log_test_legacy)
++
++static int vcu_log_get_legacy(struct mtk_vcu *vcu, unsigned long arg)
++{
++	int ret;
++	u32 type = 0;
++	struct log_test_legacy __user *uptr =
++		(struct log_test_legacy __user *)arg;
++
++	if (vcu->vdec_log_info == NULL)
++		return -ENODEV;
++
++	ret = wait_event_freezable(vcu->vdec_log_get_wq,
++				   atomic_read(&vcu->vdec_log_got));
++	if (ret != 0)
++		return ret;
++
++	if (copy_to_user(&uptr->type, &type, sizeof(type)) ||
++	    copy_to_user(uptr->log_info, vcu->vdec_log_info->log_info,
++			 LOG_INFO_SIZE))
++		ret = -EINVAL;
++	atomic_set(&vcu->vdec_log_got, 0);
++	return ret;
++}
++
+ static int vcu_log_get(struct mtk_vcu *vcu, unsigned long arg)
+ {
+ 	int ret;
+@@ -1775,6 +1864,37 @@ static long mtk_vcu_unlocked_ioctl(struct file *file, unsigned int cmd,
+ 	case VCU_GET_OBJECT:
+ 		ret = vcu_ipi_get(vcu_dev, arg);
+ 		break;
++	case VCU_GET_OBJECT_LEGACY:
++		ret = vcu_ipi_get_legacy(vcu_dev, arg);
++		break;
++	case VCU_GET_LOG_OBJECT_LEGACY:
++		ret = vcu_log_get_legacy(vcu_dev, arg);
++		break;
++	case VCU_SET_LOG_OBJECT_LEGACY:
++		/* daemon's reply to a type-1 request, which we never send */
++		ret = 0;
++		break;
++	case VCU_SET_OBJECT_LEGACY: {
++		struct share_obj_legacy lo;
++
++		user_data_addr = (unsigned char *)arg;
++		if (copy_from_user(&lo, user_data_addr, sizeof(lo)))
++			return -EINVAL;
++		memset(&share_buff_data, 0, sizeof(share_buff_data));
++		share_buff_data.id = lo.id;
++		share_buff_data.len = min_t(u32, lo.len, VCU_LEGACY_SHARE_BUF_SIZE);
++		memcpy(share_buff_data.share_buf, lo.share_buf,
++		       VCU_LEGACY_SHARE_BUF_SIZE);
++		if (share_buff_data.id >= (int)IPI_MAX ||
++		    share_buff_data.id < (int)IPI_VCU_INIT)
++			return -EINVAL;
++		ret = vcu_ipi_handler(vcu_dev, &share_buff_data);
++		vcu_obj_to_legacy(&lo, &share_buff_data);
++		ret = (long)copy_to_user(user_data_addr, &lo, sizeof(lo));
++		if (ret != 0L)
++			return -EINVAL;
++		break;
++	}
+ 	case VCU_GET_LOG_OBJECT:
+ 		ret = vcu_log_get(vcu_dev, arg);
+ 		break;
+@@ -1914,7 +2034,7 @@ static long mtk_vcu_unlocked_ioctl(struct file *file, unsigned int cmd,
+ 		ret = vcu_wait_gce_callback(vcu_dev, arg);
+ 		break;
+ 	default:
+-		dev_err(dev, "[VCU] Unknown cmd\n");
++		dev_err_ratelimited(dev, "[VCU] Unknown cmd 0x%x\n", cmd);
+ 		break;
+ 	}
+ 
