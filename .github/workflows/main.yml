@@ -1,0 +1,61 @@
+
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      KERNEL_URL:
+        description: 'Kernel Source Repository URL'
+        default: 'https://github.com/Addster09/android_kernel_xiaomi_mt6833.git'
+        required: true
+        type: string
+
+      KERNEL_BRANCH:
+        description: 'Kernel branch to build'
+        default: 'seventeen'
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout workflow repository
+        uses: actions/checkout@v6
+        with:
+          path: rootdir
+          fetch-depth: 1
+
+      - name: Cleanup
+        uses: rokibhasansagar/slimhub_actions@main
+
+      - name: Prepare dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            rsync bc cpio flex bison aptitude aria2 git \
+            python-is-python3 tar perl wget curl lz4 ccache \
+            libssl-dev zip
+
+      - name: Clone kernel source
+        run: |
+          git clone --depth=1 \
+            --branch "${{ inputs.KERNEL_BRANCH }}" \
+            "${{ inputs.KERNEL_URL }}" kernel_root
+
+      - name: Build kernel
+        id: buildKernel
+        run: |
+          cd kernel_root
+          echo "Build: $DETAILS"
+          git reset --hard 8a0ed768151e7835ce6ecc12c243303f560bea48
+          chmod +x build.sh
+          ./build.sh
+
+      - name: Upload kernel ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: AquaKernel
+          path: kernel_root/*.zip
+          if-no-files-found: error
